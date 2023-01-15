@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use fltk::{
-    app::App,
+    app::{self, App},
     enums::ColorDepth::Rgba8,
     frame::Frame,
     image::{PngImage, RgbImage},
@@ -11,12 +11,20 @@ use fltk::{
 };
 use rgb::AsPixels;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
+use std::sync::{mpsc, Arc};
+use std::thread;
 
 #[derive(Parser, Debug)]
 #[command(version)]
 struct Args {
     #[arg()]
     path: PathBuf,
+}
+
+// Pending https://github.com/rust-lang/rust/issues/67057
+fn u8_from_f64(n: f64) -> u8 {
+    (n.round() as i64).try_into().unwrap()
 }
 
 fn main() -> Result<()> {
@@ -46,33 +54,61 @@ fn main() -> Result<()> {
     // Initialize quantizer
     let mut quantizer = imagequant::new();
 
-    // Register event handler
+    // Create worker thread
+    let awaiting = Arc::new(AtomicU8::new(u8_from_f64(slider.value())));
+    let ((tx, rx), target) = (mpsc::channel(), awaiting.clone());
+    thread::spawn(move || {
+        let mut displayed = None;
+
+        loop {
+            let _: () = rx.recv().unwrap();
+            let quality = target.load(Relaxed);
+            if displayed == Some(quality) {
+                continue;
+            };
+
+            // Quantize
+            quantizer.set_speed(10).unwrap();
+            quantizer.set_quality(0, quality).unwrap();
+            let mut source_pixels = quantizer
+                .new_image_borrowed(
+                    source_rgba.as_pixels(),
+                    source.width() as usize,
+                    source.height() as usize,
+                    0.0,
+                )
+                .unwrap();
+            if target.load(Relaxed) != quality {
+                continue;
+            };
+            let mut quantization = quantizer.quantize(&mut source_pixels).unwrap();
+            if target.load(Relaxed) != quality {
+                continue;
+            };
+            quantization.set_dithering_level(0.0).unwrap();
+            let (palette, quantized_indexed) = quantization.remapped(&mut source_pixels).unwrap();
+            if target.load(Relaxed) != quality {
+                continue;
+            };
+
+            // Display
+            let quantized_rgba = quantized_indexed
+                .iter()
+                .flat_map(|&i| palette[i as usize].iter())
+                .collect::<Vec<_>>();
+            let image = RgbImage::new(&quantized_rgba, source.w(), source.h(), Rgba8).unwrap();
+            if target.load(Relaxed) != quality {
+                continue;
+            };
+            displayed.replace(quality);
+            frame.set_image(Some(image));
+            frame.redraw();
+            app::awake();
+        }
+    });
     slider.set_callback(move |s| {
-        let quality = (s.value().round() as i64).try_into().unwrap(); // Pending https://github.com/rust-lang/rust/issues/67057
-
-        // Quantize
-        quantizer.set_speed(10).unwrap();
-        quantizer.set_quality(0, quality).unwrap();
-        let mut source_pixels = quantizer
-            .new_image_borrowed(
-                source_rgba.as_pixels(),
-                source.width() as usize,
-                source.height() as usize,
-                0.0,
-            )
-            .unwrap();
-        let mut quantization = quantizer.quantize(&mut source_pixels).unwrap();
-        quantization.set_dithering_level(0.0).unwrap();
-        let (palette, quantized_indexed) = quantization.remapped(&mut source_pixels).unwrap();
-
-        // Display
-        let quantized_rgba = quantized_indexed
-            .iter()
-            .flat_map(|&i| palette[i as usize].iter())
-            .collect::<Vec<_>>();
-        let image = RgbImage::new(&quantized_rgba, source.w(), source.h(), Rgba8).unwrap();
-        frame.set_image(Some(image));
-        frame.redraw();
+        awaiting.store(u8_from_f64(s.value()), Relaxed);
+        tx.send(()).unwrap();
     });
 
     // Run
