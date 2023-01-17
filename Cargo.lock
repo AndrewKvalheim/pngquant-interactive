@@ -183,6 +183,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fltk-theme"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb79da15f3085686acda29dbbc73f0f9f6048c5cb237332be5687004ae1a7041"
+dependencies = [
+ "fltk",
+ "lazy_static",
+]
+
+[[package]]
 name = "heck"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,6 +243,12 @@ dependencies = [
  "rustix",
  "windows-sys",
 ]
+
+[[package]]
+name = "lazy_static"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
@@ -308,6 +324,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fltk",
+ "fltk-theme",
  "imagequant",
  "rgb",
 ]

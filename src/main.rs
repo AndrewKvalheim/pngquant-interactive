@@ -1,14 +1,15 @@
 use anyhow::Result;
 use clap::Parser;
 use fltk::{
-    app::{self, App},
+    app::{self, App, Scheme},
     enums::ColorDepth::Rgba8,
     frame::Frame,
     image::{PngImage, RgbImage},
     prelude::*,
-    valuator::HorNiceSlider,
+    valuator::HorValueSlider,
     window::Window,
 };
+use fltk_theme::{color_themes, ColorTheme};
 use rgb::AsPixels;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, RwLock};
@@ -24,16 +25,16 @@ struct Args {
 #[derive(Clone, Debug, PartialEq)]
 struct Params {
     pub dithering: u8,
+    pub effort: u8,
     pub quality: u8,
-    pub speed: u8,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Self {
             dithering: 0,
-            quality: 25,
-            speed: 1,
+            effort: 10,
+            quality: 20,
         }
     }
 }
@@ -48,15 +49,28 @@ fn main() -> Result<()> {
     let params = Arc::new(RwLock::new(Params::default()));
     let (tx, rx) = mpsc::channel();
 
+    // Load source
+    let source = PngImage::load(args.path)?;
+    if source.depth() != Rgba8 {
+        unimplemented!("color mode {:?}", source.depth())
+    }
+    let (w, h) = (source.width(), source.height());
+    let (vw, vh) = (w.max(480), h);
+
     // Initialize GUI
-    let app = App::default();
-    let mut window = Window::default().with_size(640, 360 + 24 + 4 * 2);
-    window.make_resizable(true);
-    let mut frame = Frame::default().size_of(&window);
+    let app = App::default().with_scheme(Scheme::Gtk);
+    ColorTheme::new(color_themes::DARK_THEME).apply();
+    let mut window = Window::default().with_size(vw, vh);
+    let mut frame = Frame::default().with_pos(0, 0).with_size(vw, vh);
     macro_rules! slider {
-        ($param:ident, $min:expr, $max:expr, $x:expr, $y:expr, $w:expr, $h:expr) => {{
-            let (tx, params) = (tx.clone(), params.clone());
-            let mut slider = HorNiceSlider::default().with_pos($x, $y).with_size($w, $h);
+        ($l:expr, $param:ident, $min:expr, $max:expr, $c0:expr, $c1:expr) => {{
+            let (c, m, sh, tx, params) = (4, 8, 24, tx.clone(), params.clone());
+            let mut slider = HorValueSlider::default()
+                .with_pos((vw - m) / c * $c0 + m, vh + m)
+                .with_size((vw - m) / c * $c1 - (vw - m) / c * $c0 - m, sh)
+                .with_label($l);
+            let (_, lh) = slider.measure_label();
+            window.set_size(window.width(), window.height().max(vh + m + sh + lh + m));
             slider.set_minimum($min.into());
             slider.set_maximum($max.into());
             slider.set_step(1.0, 1);
@@ -65,22 +79,17 @@ fn main() -> Result<()> {
                 params.write().unwrap().$param = u8_from_f64(s.value());
                 tx.send(()).unwrap();
             });
+            slider
         }};
     }
-    slider!(speed, 1, 10, 4, 364, 640 / 4 - 4 - 2, 24);
-    slider!(quality, 0, 100, 640 / 4 + 2, 364, 640 / 2 - 4 - 2, 24);
-    slider!(dithering, 0, 10, 640 / 4 * 3 + 2, 364, 640 / 4 - 4 - 2, 24);
+    slider!("Effort", effort, 1, 10, 0, 1);
+    slider!("Color Preservation", quality, 0, 100, 1, 3).take_focus()?;
+    slider!("Dithering", dithering, 0, 10, 3, 4);
     window.end();
     window.show();
 
-    // Load source
-    let source = PngImage::load(args.path)?;
-    if source.depth() != Rgba8 {
-        unimplemented!("color mode {:?}", source.depth())
-    }
-    let source_rgba = source.to_rgb_data();
-
     // Initialize quantizer
+    let source_rgba = source.to_rgb_data();
     let mut quantizer = imagequant::new();
 
     // Initialize worker
@@ -104,11 +113,11 @@ fn main() -> Result<()> {
 
             // Quantize
             quantizer.set_quality(0, working.quality)?;
-            quantizer.set_speed(working.speed.into())?;
+            quantizer.set_speed(11 - i32::from(working.effort))?;
             let mut source_pixels = quantizer.new_image_borrowed(
                 source_rgba.as_pixels(),
-                source.width() as usize,
-                source.height() as usize,
+                w.try_into()?,
+                h.try_into()?,
                 0.0,
             )?;
             abort_if_untargeted!();
@@ -121,9 +130,9 @@ fn main() -> Result<()> {
             // Display
             let quantized_rgba = quantized_indexed
                 .iter()
-                .flat_map(|&i| palette[i as usize].iter())
+                .flat_map(|&i| palette[usize::from(i)].iter())
                 .collect::<Vec<_>>();
-            let image = RgbImage::new(&quantized_rgba, source.w(), source.h(), Rgba8)?;
+            let image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
             abort_if_untargeted!();
             displayed.replace(working);
             frame.set_image(Some(image));
