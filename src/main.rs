@@ -63,14 +63,14 @@ fn main() -> Result<()> {
     let app = App::default().with_scheme(Scheme::Gtk);
     ColorTheme::new(color_themes::DARK_THEME).apply();
     let mut window = Window::default();
-    let mut frame = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
+    let mut preview = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
     y += vh;
     let mut gauge = Progress::default()
         .with_pos(m, y + m)
         .with_size(vw - m * 2, 12);
     gauge.set_minimum(0.0);
     gauge.set_maximum(1.0);
-    gauge.set_value(1.0);
+    gauge.set_value(0.0);
     y += m + gh + m;
     let mut lh = 0;
     macro_rules! slider {
@@ -147,8 +147,8 @@ fn main() -> Result<()> {
                 .collect::<Vec<_>>();
             let image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
             abort_if_untargeted!();
-            frame.set_image(Some(image));
-            frame.redraw();
+            preview.set_image(Some(image));
+            preview.redraw();
             app::awake();
 
             // Estimate size
