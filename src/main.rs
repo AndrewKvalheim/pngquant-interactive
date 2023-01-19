@@ -6,7 +6,7 @@ use clap::Parser;
 use fltk::{
     app::{self, App, Scheme},
     button::Button,
-    enums::ColorDepth::Rgba8,
+    enums::{Color, ColorDepth::Rgba8},
     frame::Frame,
     image::{PngImage, RgbImage},
     misc::Progress,
@@ -76,7 +76,10 @@ fn main() -> Result<()> {
     let mut y = 0;
     let app = App::default().with_scheme(Scheme::Gtk);
     ColorTheme::new(color_themes::DARK_THEME).apply();
-    let mut window = Window::default();
+    let mut window = Window::default().with_label(&format!(
+        "{} · pngquant",
+        &args.path.file_name().unwrap().to_str().unwrap()
+    ));
     let mut preview = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
     y += vh;
     let mut gauge = Progress::default()
@@ -85,6 +88,7 @@ fn main() -> Result<()> {
     gauge.set_minimum(0.0);
     gauge.set_maximum(1.0);
     gauge.set_value(0.0);
+    gauge.set_selection_color(Color::Foreground);
     y += m + gh + m;
     let mut lh = 0;
     macro_rules! slider {
