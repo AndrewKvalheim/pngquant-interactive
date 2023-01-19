@@ -31,8 +31,12 @@ struct Args {
 }
 
 enum Action {
+    Export,
     Preview,
-    Save,
+}
+
+enum Event {
+    Exported,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +59,8 @@ impl Default for Params {
 fn main() -> Result<()> {
     let args = Args::parse();
     let params = Arc::new(RwLock::new(Params::default()));
-    let (tx, rx) = mpsc::channel();
+    let (to_app, for_app) = app::channel();
+    let (to_worker, for_worker) = mpsc::channel();
 
     // Load source
     let source = PngImage::load(&args.path)?;
@@ -84,7 +89,7 @@ fn main() -> Result<()> {
     let mut lh = 0;
     macro_rules! slider {
         ($l:expr, $param:ident, $min:expr, $max:expr, $c0:expr, $c1:expr) => {{
-            let (tx, params) = (tx.clone(), params.clone());
+            let (to_worker, params) = (to_worker.clone(), params.clone());
             let mut slider = HorValueSlider::default()
                 .with_pos(cw * $c0 + m, y)
                 .with_size(cw * $c1 - cw * $c0 - m, sh)
@@ -96,7 +101,7 @@ fn main() -> Result<()> {
             slider.set_value(params.read().unwrap().$param.into());
             slider.set_callback(move |s| {
                 params.write().unwrap().$param = u8_from_f64(s.value());
-                tx.send(Action::Preview).unwrap();
+                to_worker.send(Action::Preview).unwrap();
             });
             slider
         }};
@@ -104,10 +109,12 @@ fn main() -> Result<()> {
     slider!("Effort", effort, 1, 10, 0, 2);
     slider!("Color Preservation", quality, 0, 100, 2, 5).take_focus()?;
     slider!("Dithering", dithering, 0, 10, 5, 7);
-
-    Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "Save").set_callback({
-        let tx = tx.clone();
-        move |_| tx.send(Action::Save).unwrap()
+    Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "OK").set_callback({
+        let to_worker = to_worker.clone();
+        move |b| {
+            b.window().unwrap().deactivate();
+            to_worker.send(Action::Export).unwrap();
+        }
     });
     y += sh + lh + m;
     window.set_size(vw, y);
@@ -124,7 +131,7 @@ fn main() -> Result<()> {
         let mut displayed = None;
 
         loop {
-            match rx.recv()? {
+            match for_worker.recv()? {
                 Action::Preview => {
                     let working = params.read().unwrap().clone();
                     match &displayed {
@@ -200,7 +207,7 @@ fn main() -> Result<()> {
 
                     displayed.replace(working);
                 }
-                Action::Save => {
+                Action::Export => {
                     let working = params.read().unwrap().clone();
 
                     // Quantize
@@ -233,13 +240,21 @@ fn main() -> Result<()> {
                     encoder.set_trns(palette_a);
                     let mut writer = encoder.write_header()?;
                     writer.write_image_data(&quantized_indexed)?;
+
+                    to_app.send(Event::Exported);
                 }
             }
         }
     });
 
     // Run
-    tx.send(Action::Preview)?;
-    app.run()?;
+    to_worker.send(Action::Preview)?;
+    while app.wait() {
+        if let Some(event) = for_app.recv() {
+            match event {
+                Event::Exported => app.quit(),
+            }
+        }
+    }
     Ok(())
 }
