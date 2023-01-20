@@ -6,7 +6,7 @@ use clap::Parser;
 use fltk::{
     app::{self, App, Scheme},
     button::Button,
-    enums::{Color, ColorDepth::Rgba8},
+    enums::{Color, ColorDepth::Rgba8, Event as UiEvent, Key},
     frame::Frame,
     image::{PngImage, RgbImage},
     misc::Progress,
@@ -115,7 +115,8 @@ fn main() -> Result<()> {
     slider!("Effort", effort, 1, 10, 0, 2);
     slider!("Color Preservation", quality, 0, 100, 2, 5).take_focus()?;
     slider!("Dithering", dithering, 0, 10, 5, 7);
-    Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "OK").set_callback({
+    let mut ok_button = Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "OK");
+    ok_button.set_callback({
         let to_worker = to_worker.clone();
         move |b| {
             b.window().unwrap().deactivate();
@@ -124,6 +125,14 @@ fn main() -> Result<()> {
     });
     y += sh + lh + m;
     window.set_size(vw, y);
+    window.handle(move |_, event| {
+        if event == UiEvent::KeyDown && app::event_key() == Key::Enter {
+            ok_button.do_callback();
+            true
+        } else {
+            false
+        }
+    });
     window.end();
     window.show();
 
