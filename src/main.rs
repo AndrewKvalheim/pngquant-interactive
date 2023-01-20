@@ -2,7 +2,7 @@ mod utils;
 
 use crate::utils::{u8_from_f64, CountingSink};
 use anyhow::Result;
-use clap::Parser;
+use clap::{value_parser, Parser};
 use fltk::{
     app::{self, App, Scheme},
     button::Button,
@@ -26,6 +26,19 @@ use std::thread;
 #[derive(Debug, Parser)]
 #[command(version)]
 struct Args {
+    /// Speed–quality tradeoff (speed <11−E>) 1–10
+    #[arg(long, short, value_name = "E", default_value_t = 10, value_parser = value_parser!(u8).range(1..=10))]
+    effort: u8,
+
+    /// Color preservation cutoff (quality 0-<P>) 0–100
+    #[arg(long, short, value_name = "P", default_value_t = 50, value_parser = value_parser!(u8).range(0..=100))]
+    preservation: u8,
+
+    /// Amount of dithering (floyd <D∕10>) 0–10
+    #[arg(long, short, value_name = "D", default_value_t = 0, value_parser = value_parser!(u8).range(0..=10))]
+    dithering: u8,
+
+    /// Source PNG file
     #[arg()]
     path: PathBuf,
 }
@@ -41,24 +54,18 @@ enum Event {
 
 #[derive(Clone, Debug, PartialEq)]
 struct Params {
-    pub dithering: u8,
-    pub effort: u8,
-    pub quality: u8,
-}
-
-impl Default for Params {
-    fn default() -> Self {
-        Self {
-            dithering: 0,
-            effort: 10,
-            quality: 20,
-        }
-    }
+    dithering: u8,
+    effort: u8,
+    preservation: u8,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let params = Arc::new(RwLock::new(Params::default()));
+    let params = Arc::new(RwLock::new(Params {
+        dithering: args.dithering,
+        effort: args.effort,
+        preservation: args.preservation,
+    }));
     let (to_app, for_app) = app::channel();
     let (to_worker, for_worker) = mpsc::channel();
 
@@ -113,7 +120,7 @@ fn main() -> Result<()> {
         }};
     }
     slider!("Effort", effort, 1, 10, 0, 2);
-    slider!("Color Preservation", quality, 0, 100, 2, 5).take_focus()?;
+    slider!("Color Preservation", preservation, 0, 100, 2, 5).take_focus()?;
     slider!("Dithering", dithering, 0, 10, 5, 7);
     let mut ok_button = Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "OK");
     ok_button.set_callback({
@@ -163,7 +170,7 @@ fn main() -> Result<()> {
                     spinner.show();
 
                     // Quantize
-                    quantizer.set_quality(0, working.quality)?;
+                    quantizer.set_quality(0, working.preservation)?;
                     quantizer.set_speed(11 - i32::from(working.effort))?;
                     let mut source_pixels = quantizer.new_image_borrowed(
                         source_rgba.as_pixels(),
@@ -228,7 +235,7 @@ fn main() -> Result<()> {
                     let working = params.read().unwrap().clone();
 
                     // Quantize
-                    quantizer.set_quality(0, working.quality)?;
+                    quantizer.set_quality(0, working.preservation)?;
                     quantizer.set_speed(11 - i32::from(working.effort))?;
                     let mut source_pixels = quantizer.new_image_borrowed(
                         source_rgba.as_pixels(),
