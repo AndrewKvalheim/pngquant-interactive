@@ -81,6 +81,8 @@ fn main() -> Result<()> {
         &args.path.file_name().unwrap().to_str().unwrap()
     ));
     let mut preview = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
+    let mut spinner = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
+    spinner.set_label("@refresh");
     y += vh;
     let mut gauge = Progress::default()
         .with_pos(m, y + m)
@@ -149,6 +151,7 @@ fn main() -> Result<()> {
                             }
                         };
                     }
+                    spinner.show();
 
                     // Quantize
                     quantizer.set_quality(0, working.quality)?;
@@ -207,6 +210,7 @@ fn main() -> Result<()> {
                     }
                     gauge.set_value(estimate(Some(&palette_rgba), &quantized_indexed)? as f64);
                     gauge.redraw();
+                    spinner.hide();
                     app::awake();
 
                     displayed.replace(working);
