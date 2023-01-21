@@ -6,7 +6,11 @@ use clap::{value_parser, Parser};
 use fltk::{
     app::{self, App, Scheme},
     button::Button,
-    enums::{Color, ColorDepth::Rgba8, Event as UiEvent, Key},
+    enums::{
+        Color,
+        ColorDepth::{Rgb8, Rgba8},
+        Event as UiEvent, Key,
+    },
     frame::Frame,
     image::{PngImage, RgbImage},
     misc::Progress,
@@ -16,7 +20,7 @@ use fltk::{
 };
 use fltk_theme::{color_themes, ColorTheme};
 use png::{ColorType, Compression, Encoder};
-use rgb::{AsPixels, ComponentBytes, RGBA8};
+use rgb::{ComponentBytes, FromSlice, RGBA8};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -72,9 +76,6 @@ fn main() -> Result<()> {
 
     // Load source
     let source = PngImage::load(&args.path)?;
-    if source.depth() != Rgba8 {
-        unimplemented!("color mode {:?}", source.depth())
-    }
     let (w, h) = (source.width(), source.height());
 
     // Initialize GUI
@@ -150,7 +151,19 @@ fn main() -> Result<()> {
     window.show();
 
     // Initialize quantizer
-    let source_rgba = source.to_rgb_data();
+    let (source_rgba, uses_alpha) = match source.depth() {
+        Rgb8 => (
+            source
+                .to_rgb_data()
+                .as_rgb()
+                .iter()
+                .map(|rgb| rgb.alpha(u8::MAX))
+                .collect(),
+            false,
+        ),
+        Rgba8 => (source.to_rgb_data().as_rgba().to_owned(), true),
+        d => unimplemented!("color mode {:?}", d),
+    };
     let mut quantizer = imagequant::new();
 
     // Initialize worker
@@ -181,7 +194,7 @@ fn main() -> Result<()> {
                     quantizer.set_quality(0, working.preservation)?;
                     quantizer.set_speed(11 - i32::from(working.effort))?;
                     let mut source_pixels = quantizer.new_image_borrowed(
-                        source_rgba.as_pixels(),
+                        &source_rgba,
                         w.try_into()?,
                         h.try_into()?,
                         0.0,
@@ -226,7 +239,9 @@ fn main() -> Result<()> {
                                     p.iter().map(|p| (p.rgb(), p.a)).unzip();
                                 encoder.set_color(ColorType::Indexed);
                                 encoder.set_palette(palette_rgb.as_bytes());
-                                encoder.set_trns(palette_a);
+                                if uses_alpha {
+                                    encoder.set_trns(palette_a);
+                                }
                                 let mut writer = encoder.write_header()?;
                                 writer.write_image_data(data)?;
                             } else {
@@ -238,7 +253,7 @@ fn main() -> Result<()> {
                         Ok(sink.len())
                     };
                     if !calibrated_gauge {
-                        gauge.set_maximum(estimate(None, &source_rgba)? as f64);
+                        gauge.set_maximum(estimate(None, source_rgba.as_bytes())? as f64);
                         calibrated_gauge = true;
                         abort_if_untargeted!();
                     }
@@ -274,7 +289,7 @@ fn main() -> Result<()> {
                     quantizer.set_quality(0, working.preservation)?;
                     quantizer.set_speed(11 - i32::from(working.effort))?;
                     let mut source_pixels = quantizer.new_image_borrowed(
-                        source_rgba.as_pixels(),
+                        &source_rgba,
                         w.try_into()?,
                         h.try_into()?,
                         0.0,
@@ -297,7 +312,9 @@ fn main() -> Result<()> {
                     encoder.set_compression(Compression::Best);
                     encoder.set_color(ColorType::Indexed);
                     encoder.set_palette(palette_rgb.as_bytes());
-                    encoder.set_trns(palette_a);
+                    if uses_alpha {
+                        encoder.set_trns(palette_a);
+                    }
                     let mut writer = encoder.write_header()?;
                     writer.write_image_data(&quantized_indexed)?;
 
