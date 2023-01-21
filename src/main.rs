@@ -46,6 +46,7 @@ struct Args {
 enum Action {
     Export,
     Preview,
+    Resize,
 }
 
 enum Event {
@@ -75,39 +76,35 @@ fn main() -> Result<()> {
         unimplemented!("color mode {:?}", source.depth())
     }
     let (w, h) = (source.width(), source.height());
-    let (vw, vh) = (w.max(480), h);
 
     // Initialize GUI
-    let (c, m, gh, sh) = (8, 8, 12, 24);
-    let cw = (vw - m) / c;
-    let mut y = 0;
+    let (c, m, lh, gh, sh) = (8, 8, 20, 12, 24);
+    let (wwm, whm) = (480, m + gh + m + sh + lh + m);
+    let (vw, vh) = (w.max(wwm), h);
+    let (wh, cw) = (vh + m + gh + m + sh + lh + m, (vw - m) / c);
     let app = App::default().with_scheme(Scheme::Gtk);
     ColorTheme::new(color_themes::DARK_THEME).apply();
-    let mut window = Window::default().with_label(&format!(
+    let mut window = Window::default().with_size(vw, wh).with_label(&format!(
         "{} · pngquant",
         &args.path.file_name().unwrap().to_str().unwrap()
     ));
-    let mut preview = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
-    let mut spinner = Frame::default().with_pos(0, 0).with_size(vw, y + vh);
+    let mut preview = Frame::default().with_pos(0, 0).with_size(vw, vh);
+    let mut spinner = Frame::default().with_pos(0, 0).with_size(vw, vh);
     spinner.set_label("@refresh");
-    y += vh;
     let mut gauge = Progress::default()
-        .with_pos(m, y + m)
-        .with_size(vw - m * 2, 12);
+        .with_pos(m, vh + m)
+        .with_size(vw - m * 2, gh);
     gauge.set_minimum(0.0);
     gauge.set_maximum(1.0);
     gauge.set_value(0.0);
     gauge.set_selection_color(Color::Foreground);
-    y += m + gh + m;
-    let mut lh = 0;
     macro_rules! slider {
         ($l:expr, $param:ident, $min:expr, $max:expr, $c0:expr, $c1:expr) => {{
             let (to_worker, params) = (to_worker.clone(), params.clone());
             let mut slider = HorValueSlider::default()
-                .with_pos(cw * $c0 + m, y)
+                .with_pos(cw * $c0 + m, vh + m + gh + m)
                 .with_size(cw * $c1 - cw * $c0 - m, sh)
                 .with_label($l);
-            lh = lh.max(slider.measure_label().1);
             slider.set_minimum($min.into());
             slider.set_maximum($max.into());
             slider.set_step(1.0, 1);
@@ -122,7 +119,10 @@ fn main() -> Result<()> {
     slider!("Effort", effort, 1, 10, 0, 2);
     slider!("Color Preservation", preservation, 0, 100, 2, 5).take_focus()?;
     slider!("Dithering", dithering, 0, 10, 5, 7);
-    let mut ok_button = Button::new(cw * 7 + m, y, cw * 8 - cw * 7 - m, sh + lh, "OK");
+    let mut ok_button = Button::default()
+        .with_pos(cw * 7 + m, vh + m + gh + m)
+        .with_size(cw * 8 - cw * 7 - m, sh + lh)
+        .with_label("OK");
     ok_button.set_callback({
         let to_worker = to_worker.clone();
         move |b| {
@@ -130,16 +130,22 @@ fn main() -> Result<()> {
             to_worker.send(Action::Export).unwrap();
         }
     });
-    y += sh + lh + m;
-    window.set_size(vw, y);
-    window.handle(move |_, event| {
-        if event == UiEvent::KeyDown && app::event_key() == Key::Enter {
-            ok_button.do_callback();
-            true
-        } else {
-            false
+    window.handle({
+        let to_worker = to_worker.clone();
+        move |_, event| match event {
+            UiEvent::KeyDown if app::event_key() == Key::Enter => {
+                ok_button.do_callback();
+                true
+            }
+            UiEvent::Resize => {
+                to_worker.send(Action::Resize).unwrap();
+                true
+            }
+            _ => false,
         }
     });
+    window.resizable(&preview);
+    window.size_range(wwm, whm, 0, 0);
     window.end();
     window.show();
 
@@ -150,13 +156,15 @@ fn main() -> Result<()> {
     // Initialize worker
     thread::spawn(move || -> Result<()> {
         let mut calibrated_gauge = false;
-        let mut displayed = None;
+        let mut displayed_params = None;
+        let mut displayed_size = None;
+        let mut quantized_rgba: Vec<u8> = Vec::with_capacity(4usize * (w * h) as usize);
 
         loop {
             match for_worker.recv()? {
                 Action::Preview => {
                     let working = params.read().unwrap().clone();
-                    match &displayed {
+                    match &displayed_params {
                         Some(d) if d == &working => continue,
                         _ => {}
                     }
@@ -187,11 +195,21 @@ fn main() -> Result<()> {
                     abort_if_untargeted!();
 
                     // Display
-                    let quantized_rgba = quantized_indexed
-                        .iter()
-                        .flat_map(|&i| palette_rgba[usize::from(i)].iter())
-                        .collect::<Vec<_>>();
-                    let image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
+                    quantized_rgba.clear();
+                    quantized_rgba.extend(
+                        quantized_indexed
+                            .iter()
+                            .flat_map(|&i| palette_rgba[usize::from(i)].iter()),
+                    );
+                    abort_if_untargeted!();
+                    let mut image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
+                    let (pw, ph) = (preview.width(), preview.height());
+                    let display_size = if pw < w || ph < h {
+                        image.scale(pw, ph, true, false);
+                        (pw, ph)
+                    } else {
+                        (w, h)
+                    };
                     abort_if_untargeted!();
                     preview.set_image(Some(image));
                     preview.redraw();
@@ -229,7 +247,25 @@ fn main() -> Result<()> {
                     spinner.hide();
                     app::awake();
 
-                    displayed.replace(working);
+                    displayed_params.replace(working);
+                    displayed_size.replace(display_size);
+                }
+                Action::Resize => {
+                    if let Some((dw, dh)) = displayed_size {
+                        let (pw, ph) = (preview.width(), preview.height());
+
+                        if pw < dw || (dw < pw && dw < w) || ph < dh || (dh < ph && dh < h) {
+                            let mut image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
+                            let display_size = if pw < w || ph < h {
+                                image.scale(pw, ph, true, false);
+                                (pw, ph)
+                            } else {
+                                (w, h)
+                            };
+                            preview.set_image(Some(image));
+                            displayed_size.replace(display_size);
+                        }
+                    }
                 }
                 Action::Export => {
                     let working = params.read().unwrap().clone();
