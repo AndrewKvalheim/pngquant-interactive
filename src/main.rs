@@ -86,7 +86,7 @@ fn main() -> Result<()> {
     let app = App::default().with_scheme(Scheme::Gtk);
     ColorTheme::new(color_themes::DARK_THEME).apply();
     let mut window = Window::default().with_size(vw, wh).with_label(&format!(
-        "{} · pngquant",
+        "{} · pngquant-interactive",
         &args.path.file_name().unwrap().to_str().unwrap()
     ));
     let mut preview = Frame::default().with_pos(0, 0).with_size(vw, vh);
