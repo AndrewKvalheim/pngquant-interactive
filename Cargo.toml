@@ -2,6 +2,10 @@
 name = "pngquant-interactive"
 version = "0.0.0"
 license = "GPL-3.0"
+categories = ["graphics"]
+description = "Graphical interface for pngquant with a live preview"
+repository = "https://github.com/AndrewKvalheim/pngquant-interactive"
+authors = ["Andrew Kvalheim <andrew@kvalhe.im>"]
 edition = "2021"
 
 [dependencies]
