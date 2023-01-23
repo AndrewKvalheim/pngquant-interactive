@@ -1,26 +1,31 @@
-mod utils;
+#![warn(clippy::nursery, clippy::pedantic)]
+#![allow(
+    clippy::derive_partial_eq_without_eq,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
 
-use crate::utils::{u8_from_f64, CountingSink};
+mod encode;
+mod preview;
+mod source;
+mod utilities;
+
+use crate::encode::{Encode, Priority};
+use crate::preview::{Params, Preview};
+use crate::source::Source;
+use crate::utilities::u8_from_f64;
 use anyhow::Result;
 use clap::{value_parser, Parser};
-use fltk::{
-    app::{self, App, Scheme},
-    button::Button,
-    enums::{
-        Color,
-        ColorDepth::{Rgb8, Rgba8},
-        Event as UiEvent, Key,
-    },
-    frame::Frame,
-    image::{PngImage, RgbImage},
-    misc::Progress,
-    prelude::*,
-    valuator::HorValueSlider,
-    window::Window,
-};
+use fltk::app::{self, App, Scheme};
+use fltk::button::Button;
+use fltk::enums::{Color, Event as UiEvent, Key};
+use fltk::frame::Frame;
+use fltk::image::PngImage;
+use fltk::misc::Progress;
+use fltk::prelude::*;
+use fltk::valuator::HorValueSlider;
+use fltk::window::Window;
 use fltk_theme::{color_themes, ColorTheme};
-use png::{ColorType, Compression, Encoder};
-use rgb::{ComponentBytes, FromSlice, RGBA8};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -57,48 +62,44 @@ enum Event {
     Exported,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Params {
-    dithering: u8,
-    effort: u8,
-    preservation: u8,
-}
-
 fn main() -> Result<()> {
     let args = Args::parse();
+    let source = Source::from(PngImage::load(&args.path)?);
     let params = Arc::new(RwLock::new(Params {
         dithering: args.dithering,
         effort: args.effort,
         preservation: args.preservation,
     }));
+
     let (to_app, for_app) = app::channel();
     let (to_worker, for_worker) = mpsc::channel();
 
-    // Load source
-    let source = PngImage::load(&args.path)?;
-    let (w, h) = (source.width(), source.height());
-
-    // Initialize GUI
+    // Build GUI
     let (c, m, lh, gh, sh) = (8, 8, 20, 12, 24);
-    let (wwm, whm) = (480, m + gh + m + sh + lh + m);
-    let (vw, vh) = (w.max(wwm), h);
+    let (ww_min, wh_min) = (480, m + gh + m + sh + lh + m);
+    let (vw, vh) = (
+        (i32::try_from(source.width)?).max(ww_min),
+        i32::try_from(source.height)?,
+    );
     let (wh, cw) = (vh + m + gh + m + sh + lh + m, (vw - m) / c);
     let app = App::default().with_scheme(Scheme::Gtk);
     ColorTheme::new(color_themes::DARK_THEME).apply();
     let mut window = Window::default().with_size(vw, wh).with_label(&format!(
         "{} · pngquant-interactive",
-        &args.path.file_name().unwrap().to_str().unwrap()
+        &args.path.file_name().expect("file").to_str().expect("UTF8")
     ));
-    let mut preview = Frame::default().with_pos(0, 0).with_size(vw, vh);
-    let mut spinner = Frame::default().with_pos(0, 0).with_size(vw, vh);
-    spinner.set_label("@refresh");
+    let mut view = Frame::default().with_pos(0, 0).with_size(vw, vh);
+    let mut spinner = Frame::default()
+        .with_pos(0, 0)
+        .with_size(vw, vh)
+        .with_label("@refresh");
     let mut gauge = Progress::default()
         .with_pos(m, vh + m)
         .with_size(vw - m * 2, gh);
+    gauge.set_selection_color(Color::Foreground);
     gauge.set_minimum(0.0);
     gauge.set_maximum(1.0);
     gauge.set_value(0.0);
-    gauge.set_selection_color(Color::Foreground);
     macro_rules! slider {
         ($l:expr, $param:ident, $min:expr, $max:expr, $c0:expr, $c1:expr) => {{
             let (to_worker, params) = (to_worker.clone(), params.clone());
@@ -109,10 +110,10 @@ fn main() -> Result<()> {
             slider.set_minimum($min.into());
             slider.set_maximum($max.into());
             slider.set_step(1.0, 1);
-            slider.set_value(params.read().unwrap().$param.into());
+            slider.set_value(params.read().expect("params").$param.into());
             slider.set_callback(move |s| {
-                params.write().unwrap().$param = u8_from_f64(s.value());
-                to_worker.send(Action::Preview).unwrap();
+                params.write().expect("params").$param = u8_from_f64(s.value());
+                to_worker.send(Action::Preview).expect("worker");
             });
             slider
         }};
@@ -127,10 +128,12 @@ fn main() -> Result<()> {
     ok_button.set_callback({
         let to_worker = to_worker.clone();
         move |b| {
-            b.window().unwrap().deactivate();
-            to_worker.send(Action::Export).unwrap();
+            b.window().expect("window").deactivate();
+            to_worker.send(Action::Export).expect("worker");
         }
     });
+    window.resizable(&view);
+    window.size_range(ww_min, wh_min, 0, 0);
     window.handle({
         let to_worker = to_worker.clone();
         move |_, event| match event {
@@ -139,186 +142,90 @@ fn main() -> Result<()> {
                 true
             }
             UiEvent::Resize => {
-                to_worker.send(Action::Resize).unwrap();
-                true
+                to_worker.send(Action::Resize).expect("worker");
+                false
             }
             _ => false,
         }
     });
-    window.resizable(&preview);
-    window.size_range(wwm, whm, 0, 0);
     window.end();
     window.show();
 
-    // Initialize quantizer
-    let (source_rgba, uses_alpha) = match source.depth() {
-        Rgb8 => (
-            source
-                .to_rgb_data()
-                .as_rgb()
-                .iter()
-                .map(|rgb| rgb.alpha(u8::MAX))
-                .collect(),
-            false,
-        ),
-        Rgba8 => (source.to_rgb_data().as_rgba().to_owned(), true),
-        d => unimplemented!("color mode {:?}", d),
-    };
-    let mut quantizer = imagequant::new();
-
-    // Initialize worker
+    // Start worker
     thread::spawn(move || -> Result<()> {
-        let mut calibrated_gauge = false;
-        let mut displayed_params = None;
-        let mut displayed_size = None;
-        let mut quantized_rgba: Vec<u8> = Vec::with_capacity(4usize * (w * h) as usize);
+        let mut preview = Preview::from(source);
+        let mut viewed_params = None;
+        let mut viewed_size = None;
+
+        #[allow(clippy::cast_precision_loss)]
+        gauge.set_maximum(preview.source.estimate()? as f64);
 
         loop {
             match for_worker.recv()? {
+                Action::Export => {
+                    let params = params.read().expect("params").clone();
+                    let path = args.path.with_file_name(format!(
+                        "{}-{}.png",
+                        args.path.file_stem().expect("file").to_str().expect("UTF8"),
+                        if params.dithering == 0 { "or8" } else { "fs8" }
+                    ));
+
+                    preview.quantize(&params)?;
+                    preview.encode(Priority::Size, BufWriter::new(File::create(path)?))?;
+                    to_app.send(Event::Exported);
+                }
                 Action::Preview => {
-                    let working = params.read().unwrap().clone();
-                    match &displayed_params {
-                        Some(d) if d == &working => continue,
-                        _ => {}
-                    }
+                    let working = params.read().expect("params").clone();
                     macro_rules! abort_if_untargeted {
                         () => {
-                            if *params.read().unwrap() != working {
+                            if *params.read().expect("params") != working {
                                 continue;
                             }
                         };
                     }
+                    match &viewed_params {
+                        Some(p) if p == &working => continue,
+                        _ => {}
+                    }
                     spinner.show();
 
                     // Quantize
-                    quantizer.set_quality(0, working.preservation)?;
-                    quantizer.set_speed(11 - i32::from(working.effort))?;
-                    let mut source_pixels = quantizer.new_image_borrowed(
-                        &source_rgba,
-                        w.try_into()?,
-                        h.try_into()?,
-                        0.0,
-                    )?;
-                    abort_if_untargeted!();
-                    let mut quantization = quantizer.quantize(&mut source_pixels)?;
-                    abort_if_untargeted!();
-                    quantization.set_dithering_level(f32::from(working.dithering) / 10.0)?;
-                    let (palette_rgba, quantized_indexed) =
-                        quantization.remapped(&mut source_pixels)?;
+                    preview.quantize(&working)?;
                     abort_if_untargeted!();
 
                     // Display
-                    quantized_rgba.clear();
-                    quantized_rgba.extend(
-                        quantized_indexed
-                            .iter()
-                            .flat_map(|&i| palette_rgba[usize::from(i)].iter()),
-                    );
+                    #[allow(clippy::cast_sign_loss)]
+                    let (width, height) = (view.width() as usize, view.height() as usize);
+                    let image = preview.display(width, height)?;
                     abort_if_untargeted!();
-                    let mut image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
-                    let (pw, ph) = (preview.width(), preview.height());
-                    let display_size = if pw < w || ph < h {
-                        image.scale(pw, ph, true, false);
-                        (pw, ph)
-                    } else {
-                        (w, h)
-                    };
-                    abort_if_untargeted!();
-                    preview.set_image(Some(image));
-                    preview.redraw();
-                    app::awake();
-
-                    // Estimate size
-                    let estimate = |palette_rgba: Option<&[RGBA8]>, data: &[u8]| -> Result<usize> {
-                        let mut sink = CountingSink::default();
-                        {
-                            let mut encoder = Encoder::new(&mut sink, w.try_into()?, h.try_into()?);
-                            encoder.set_compression(Compression::Fast);
-                            if let Some(p) = palette_rgba {
-                                let (palette_rgb, palette_a): (Vec<_>, Vec<_>) =
-                                    p.iter().map(|p| (p.rgb(), p.a)).unzip();
-                                encoder.set_color(ColorType::Indexed);
-                                encoder.set_palette(palette_rgb.as_bytes());
-                                if uses_alpha {
-                                    encoder.set_trns(palette_a);
-                                }
-                                let mut writer = encoder.write_header()?;
-                                writer.write_image_data(data)?;
-                            } else {
-                                encoder.set_color(ColorType::Rgba);
-                                let mut writer = encoder.write_header()?;
-                                writer.write_image_data(data)?;
-                            }
-                        }
-                        Ok(sink.len())
-                    };
-                    if !calibrated_gauge {
-                        gauge.set_maximum(estimate(None, source_rgba.as_bytes())? as f64);
-                        calibrated_gauge = true;
-                        abort_if_untargeted!();
-                    }
-                    gauge.set_value(estimate(Some(&palette_rgba), &quantized_indexed)? as f64);
-                    gauge.redraw();
+                    view.set_image(Some(image));
+                    viewed_size.replace((width, height));
                     spinner.hide();
                     app::awake();
 
-                    displayed_params.replace(working);
-                    displayed_size.replace(display_size);
+                    // Estimate size
+                    let estimate = preview.estimate()?;
+                    abort_if_untargeted!();
+                    #[allow(clippy::cast_precision_loss)]
+                    gauge.set_value(estimate as f64);
+                    viewed_params.replace(working);
+                    gauge.redraw();
+                    app::awake();
                 }
                 Action::Resize => {
-                    if let Some((dw, dh)) = displayed_size {
-                        let (pw, ph) = (preview.width(), preview.height());
+                    if let Some((pvw, pvh)) = viewed_size {
+                        #[allow(clippy::cast_sign_loss)]
+                        let (vw, vh) = (view.width() as usize, view.height() as usize);
+                        let (w, h) = (preview.source.width, preview.source.height);
 
-                        if pw < dw || (dw < pw && dw < w) || ph < dh || (dh < ph && dh < h) {
-                            let mut image = RgbImage::new(&quantized_rgba, w, h, Rgba8)?;
-                            let display_size = if pw < w || ph < h {
-                                image.scale(pw, ph, true, false);
-                                (pw, ph)
-                            } else {
-                                (w, h)
-                            };
-                            preview.set_image(Some(image));
-                            displayed_size.replace(display_size);
+                        if vw < pvw || vh < pvh || (pvw < vw && pvw < w) || (pvh < vh && pvh < h) {
+                            view.set_image(Some(preview.display(vw, vh)?));
+                            viewed_size.replace((vw, vh));
+                            spinner.show(); // Workaround to fully redraw view
+                            spinner.hide();
+                            app::awake();
                         }
                     }
-                }
-                Action::Export => {
-                    let working = params.read().unwrap().clone();
-
-                    // Quantize
-                    quantizer.set_quality(0, working.preservation)?;
-                    quantizer.set_speed(11 - i32::from(working.effort))?;
-                    let mut source_pixels = quantizer.new_image_borrowed(
-                        &source_rgba,
-                        w.try_into()?,
-                        h.try_into()?,
-                        0.0,
-                    )?;
-                    let mut quantization = quantizer.quantize(&mut source_pixels)?;
-                    quantization.set_dithering_level(f32::from(working.dithering) / 10.0)?;
-                    let (palette_rgba, quantized_indexed) =
-                        quantization.remapped(&mut source_pixels)?;
-
-                    // Encode
-                    let (palette_rgb, palette_a): (Vec<_>, Vec<_>) =
-                        palette_rgba.iter().map(|p| (p.rgb(), p.a)).unzip();
-                    let path = args.path.with_file_name(format!(
-                        "{}-{}.png",
-                        args.path.file_stem().unwrap().to_str().unwrap(),
-                        if working.dithering == 0 { "or8" } else { "fs8" }
-                    ));
-                    let file = BufWriter::new(File::create(path)?);
-                    let mut encoder = Encoder::new(file, w.try_into()?, h.try_into()?);
-                    encoder.set_compression(Compression::Best);
-                    encoder.set_color(ColorType::Indexed);
-                    encoder.set_palette(palette_rgb.as_bytes());
-                    if uses_alpha {
-                        encoder.set_trns(palette_a);
-                    }
-                    let mut writer = encoder.write_header()?;
-                    writer.write_image_data(&quantized_indexed)?;
-
-                    to_app.send(Event::Exported);
                 }
             }
         }
