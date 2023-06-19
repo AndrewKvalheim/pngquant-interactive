@@ -47,6 +47,10 @@ struct Args {
     #[arg(long, short, value_name = "D", default_value_t = 0, value_parser = value_parser!(u8).range(0..=10))]
     dithering: u8,
 
+    /// Suffix of output file name [default: "-fs8" or "-or8"]
+    #[arg(long, short = 'u')]
+    suffix: Option<String>,
+
     /// Source PNG file
     #[arg()]
     path: PathBuf,
@@ -164,11 +168,13 @@ fn main() -> Result<()> {
             match for_worker.recv()? {
                 Action::Export => {
                     let params = params.read().expect("params").clone();
-                    let path = args.path.with_file_name(format!(
-                        "{}-{}.png",
-                        args.path.file_stem().expect("file").to_str().expect("UTF8"),
-                        if params.dithering == 0 { "or8" } else { "fs8" }
-                    ));
+                    let stem = args.path.file_stem().expect("file").to_str().expect("UTF8");
+                    let suffix = match args.suffix {
+                        Some(ref s) => s,
+                        None if params.dithering == 0 => "-or8",
+                        _ => "-fs8",
+                    };
+                    let path = args.path.with_file_name(format!("{stem}{suffix}.png"));
 
                     preview.quantize(&params)?;
                     preview.encode(Priority::Size, BufWriter::new(File::create(path)?))?;
